@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict
 import time
+import uuid
 
 app = FastAPI(title="Smart Parking Backend")
 
@@ -30,6 +31,10 @@ class ReservationRequest(BaseModel):
     node_id: str
     reserved: bool
 
+class QRCheckinRequest(BaseModel):
+    node_id: str
+    qr_token: str
+
 # -----------------------------
 # Storage
 # -----------------------------
@@ -37,15 +42,15 @@ parking_states: Dict[str, dict] = {}
 RESERVATION_DURATION = 30  # seconds (testing)
 
 # -----------------------------
-# FINAL DECISION LOGIC (FIXED)
+# FINAL DECISION LOGIC
 # -----------------------------
-def compute_final(sensor_status: str, reserved: bool, admin_mode: str) -> str:
+def compute_final(sensor_status: str, reserved: bool, admin_mode: str, checked_in: bool) -> str:
     # 1️⃣ Maintenance overrides everything
     if admin_mode == "MAINTENANCE":
         return "MAINTENANCE"
 
-    # 2️⃣ Violation = reserved + occupied
-    if reserved and sensor_status == "OCCUPIED":
+    # 2️⃣ Violation = reserved + occupied + NOT checked in
+    if reserved and not checked_in and sensor_status == "OCCUPIED":
         return "VIOLATION"
 
     # 3️⃣ Reserved but not occupied
@@ -66,6 +71,9 @@ def enforce_expiry(node: dict):
             node["reservation_start"] = None
             node["reservation_expiry"] = None
             node["violation"] = False
+            node["qr_token"] = None
+            node["checked_in"] = False
+            node["checkin_time"] = None
 
 # -----------------------------
 # Sensor Update (from gateway)
@@ -82,7 +90,12 @@ def update_node(data: SensorUpdate):
         "reservation_start": None,
         "reservation_expiry": None,
         "admin_mode": "NORMAL",
-        "last_update": None
+        "last_update": None,
+
+        # 🔑 QR additions
+        "qr_token": None,
+        "checked_in": False,
+        "checkin_time": None
     })
 
     enforce_expiry(node)
@@ -91,25 +104,27 @@ def update_node(data: SensorUpdate):
     node["distance_cm"] = data.distance_cm
     node["last_update"] = now
 
-    # Violation logic (metadata)
+    # Violation logic
     node["violation"] = (
         node["admin_mode"] == "NORMAL"
         and node["reserved"]
+        and not node["checked_in"]
         and data.sensor_status == "OCCUPIED"
     )
 
     node["final_status"] = compute_final(
         data.sensor_status,
         node["reserved"],
-        node["admin_mode"]
+        node["admin_mode"],
+        node["checked_in"]
     )
 
     print(
         f"[UPDATE] {data.node_id} | "
         f"SENSOR={data.sensor_status} | "
-        f"MODE={node['admin_mode']} | "
-        f"FINAL={node['final_status']} | "
-        f"VIOLATION={node['violation']}"
+        f"RESERVED={node['reserved']} | "
+        f"CHECKED_IN={node['checked_in']} | "
+        f"FINAL={node['final_status']}"
     )
 
     return {"status": "ok"}
@@ -132,20 +147,69 @@ def reserve_space(req: ReservationRequest):
         node["reserved"] = True
         node["reservation_start"] = now
         node["reservation_expiry"] = now + RESERVATION_DURATION
+
+        # 🔑 Generate QR token
+        node["qr_token"] = str(uuid.uuid4())
+        node["checked_in"] = False
+        node["checkin_time"] = None
     else:
         node["reserved"] = False
         node["reservation_start"] = None
         node["reservation_expiry"] = None
         node["violation"] = False
+        node["qr_token"] = None
+        node["checked_in"] = False
+        node["checkin_time"] = None
 
     node["final_status"] = compute_final(
         node["sensor_status"],
         node["reserved"],
-        node["admin_mode"]
+        node["admin_mode"],
+        node["checked_in"]
     )
 
     print(f"[RESERVE] {req.node_id} | RESERVED={node['reserved']}")
-    return {"status": "ok"}
+
+    return {
+        "status": "ok",
+        "qr_token": node["qr_token"],
+        "expires_at": node["reservation_expiry"]
+    }
+
+# -----------------------------
+# QR CHECK-IN (ENTRANCE)
+# -----------------------------
+@app.post("/api/checkin")
+def qr_checkin(req: QRCheckinRequest):
+    node = parking_states.get(req.node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    enforce_expiry(node)
+
+    if not node["reserved"]:
+        raise HTTPException(status_code=400, detail="No active reservation")
+
+    if node["checked_in"]:
+        raise HTTPException(status_code=400, detail="Already checked in")
+
+    if req.qr_token != node["qr_token"]:
+        raise HTTPException(status_code=401, detail="Invalid QR code")
+
+    # ✅ Successful check-in
+    node["checked_in"] = True
+    node["checkin_time"] = int(time.time())
+
+    node["final_status"] = compute_final(
+        node["sensor_status"],
+        node["reserved"],
+        node["admin_mode"],
+        node["checked_in"]
+    )
+
+    print(f"[CHECK-IN] {req.node_id} → SUCCESS")
+
+    return {"status": "checked_in"}
 
 # -----------------------------
 # ADMIN: Maintenance ON
@@ -161,6 +225,9 @@ def set_maintenance(node_id: str):
     node["violation"] = False
     node["reservation_start"] = None
     node["reservation_expiry"] = None
+    node["qr_token"] = None
+    node["checked_in"] = False
+    node["checkin_time"] = None
 
     node["final_status"] = "MAINTENANCE"
 
@@ -182,7 +249,8 @@ def resume_normal(node_id: str):
     node["final_status"] = compute_final(
         node["sensor_status"],
         node["reserved"],
-        node["admin_mode"]
+        node["admin_mode"],
+        node["checked_in"]
     )
 
     print(f"[ADMIN] {node_id} → NORMAL")
@@ -202,14 +270,15 @@ def get_status():
             "final_status": compute_final(
                 node["sensor_status"],
                 node["reserved"],
-                node["admin_mode"]
+                node["admin_mode"],
+                node["checked_in"]
             ),
             "sensor_status": node["sensor_status"],
             "distance_cm": node["distance_cm"],
             "reserved": node["reserved"],
+            "checked_in": node["checked_in"],
             "violation": node["violation"],
             "reservation_expiry": node["reservation_expiry"],
-            "server_timestamp": node["last_update"],
             "admin_mode": node["admin_mode"]
         }
 
