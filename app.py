@@ -279,7 +279,8 @@ def get_status():
             "checked_in": node["checked_in"],
             "violation": node["violation"],
             "reservation_expiry": node["reservation_expiry"],
-            "admin_mode": node["admin_mode"]
+            "admin_mode": node["admin_mode"],
+            "server_timestamp": node["last_update"]
         }
 
     return out
