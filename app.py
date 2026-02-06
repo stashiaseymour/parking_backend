@@ -44,27 +44,28 @@ RESERVATION_DURATION = 30  # seconds (testing)
 # -----------------------------
 # INITIAL PARKING SPACES
 # -----------------------------
+def create_default_node(node_id: str):
+    return {
+        "sensor_status": "FREE",
+        "distance_cm": 0.0,
+        "reserved": False,
+        "violation": False,
+        "reservation_start": None,
+        "reservation_expiry": None,
+        "admin_mode": "NORMAL",
+        "last_update": None,
+        "qr_token": None,
+        "checked_in": False,
+        "checkin_time": None,
+        "final_status": "CLEAR"
+    }
+
 def initialize_parking_spaces():
-    default_nodes = ["A1", "A2", "A3"]
-
-    for node_id in default_nodes:
+    for node_id in ["A1", "A2", "A3"]:
         if node_id not in parking_states:
-            parking_states[node_id] = {
-                "sensor_status": "FREE",
-                "distance_cm": 0.0,
-                "reserved": False,
-                "violation": False,
-                "reservation_start": None,
-                "reservation_expiry": None,
-                "admin_mode": "NORMAL",
-                "last_update": None,
-                "qr_token": None,
-                "checked_in": False,
-                "checkin_time": None,
-                "final_status": "CLEAR"
-            }
+            parking_states[node_id] = create_default_node(node_id)
 
-# Run once when server starts
+# Run once at startup
 initialize_parking_spaces()
 
 # -----------------------------
@@ -73,13 +74,10 @@ initialize_parking_spaces()
 def compute_final(sensor_status: str, reserved: bool, admin_mode: str, checked_in: bool) -> str:
     if admin_mode == "MAINTENANCE":
         return "MAINTENANCE"
-
     if reserved and not checked_in and sensor_status == "OCCUPIED":
         return "VIOLATION"
-
     if reserved:
         return "RESERVED"
-
     return "CLEAR"
 
 # -----------------------------
@@ -89,13 +87,15 @@ def enforce_expiry(node: dict):
     now = int(time.time())
     if node["reserved"] and node["reservation_expiry"]:
         if now >= node["reservation_expiry"]:
-            node["reserved"] = False
-            node["reservation_start"] = None
-            node["reservation_expiry"] = None
-            node["violation"] = False
-            node["qr_token"] = None
-            node["checked_in"] = False
-            node["checkin_time"] = None
+            node.update({
+                "reserved": False,
+                "reservation_start": None,
+                "reservation_expiry": None,
+                "violation": False,
+                "qr_token": None,
+                "checked_in": False,
+                "checkin_time": None
+            })
 
 # -----------------------------
 # Sensor Update (from gateway)
@@ -104,7 +104,11 @@ def enforce_expiry(node: dict):
 def update_node(data: SensorUpdate):
     now = int(time.time())
 
-    node = parking_states.setdefault(data.node_id, parking_states.get(data.node_id, {}))
+    # ✅ NEVER allow empty dicts
+    if data.node_id not in parking_states:
+        parking_states[data.node_id] = create_default_node(data.node_id)
+
+    node = parking_states[data.node_id]
 
     enforce_expiry(node)
 
@@ -146,26 +150,32 @@ def reserve_space(req: ReservationRequest):
 
     node = parking_states[req.node_id]
     now = int(time.time())
+
+    # ✅ Reservation counts as activity
     node["last_update"] = now
 
     if node["admin_mode"] == "MAINTENANCE":
         raise HTTPException(status_code=400, detail="Node in maintenance")
 
     if req.reserved:
-        node["reserved"] = True
-        node["reservation_start"] = now
-        node["reservation_expiry"] = now + RESERVATION_DURATION
-        node["qr_token"] = str(uuid.uuid4())
-        node["checked_in"] = False
-        node["checkin_time"] = None
+        node.update({
+            "reserved": True,
+            "reservation_start": now,
+            "reservation_expiry": now + RESERVATION_DURATION,
+            "qr_token": str(uuid.uuid4()),
+            "checked_in": False,
+            "checkin_time": None
+        })
     else:
-        node["reserved"] = False
-        node["reservation_start"] = None
-        node["reservation_expiry"] = None
-        node["violation"] = False
-        node["qr_token"] = None
-        node["checked_in"] = False
-        node["checkin_time"] = None
+        node.update({
+            "reserved": False,
+            "reservation_start": None,
+            "reservation_expiry": None,
+            "violation": False,
+            "qr_token": None,
+            "checked_in": False,
+            "checkin_time": None
+        })
 
     node["final_status"] = compute_final(
         node["sensor_status"],
@@ -204,6 +214,7 @@ def qr_checkin(req: QRCheckinRequest):
 
     node["checked_in"] = True
     node["checkin_time"] = int(time.time())
+    node["last_update"] = int(time.time())
 
     node["final_status"] = compute_final(
         node["sensor_status"],
@@ -225,15 +236,18 @@ def set_maintenance(node_id: str):
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
-    node["admin_mode"] = "MAINTENANCE"
-    node["reserved"] = False
-    node["violation"] = False
-    node["reservation_start"] = None
-    node["reservation_expiry"] = None
-    node["qr_token"] = None
-    node["checked_in"] = False
-    node["checkin_time"] = None
-    node["final_status"] = "MAINTENANCE"
+    node.update({
+        "admin_mode": "MAINTENANCE",
+        "reserved": False,
+        "violation": False,
+        "reservation_start": None,
+        "reservation_expiry": None,
+        "qr_token": None,
+        "checked_in": False,
+        "checkin_time": None,
+        "final_status": "MAINTENANCE",
+        "last_update": int(time.time())
+    })
 
     print(f"[ADMIN] {node_id} → MAINTENANCE")
     return {"status": "ok"}
@@ -249,6 +263,7 @@ def resume_normal(node_id: str):
 
     node["admin_mode"] = "NORMAL"
     node["violation"] = False
+    node["last_update"] = int(time.time())
 
     node["final_status"] = compute_final(
         node["sensor_status"],
