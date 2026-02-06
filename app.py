@@ -9,7 +9,7 @@ from pymongo import MongoClient
 app = FastAPI(title="Smart Parking Backend")
 
 # -----------------------------
-# MongoDB Setup (Render-safe)
+# MongoDB Setup
 # -----------------------------
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
@@ -72,17 +72,7 @@ def create_default_node(node_id: str):
     }
 
 # -----------------------------
-# Initialize Parking Spaces
-# -----------------------------
-def initialize_parking_spaces():
-    for node_id in ["A1", "A2", "A3"]:
-        if not parking_collection.find_one({"node_id": node_id}):
-            parking_collection.insert_one(create_default_node(node_id))
-
-initialize_parking_spaces()
-
-# -----------------------------
-# Final Decision Logic (SOURCE OF TRUTH)
+# Final Decision Logic
 # -----------------------------
 def compute_final(sensor_status, reserved, admin_mode, checked_in):
     if admin_mode == "MAINTENANCE":
@@ -113,11 +103,9 @@ def enforce_expiry(node):
                     "last_update": now
                 }}
             )
-            return True
-    return False
 
 # -----------------------------
-# Sensor Update (Gateway + Sessions)
+# Sensor Update (Gateway)
 # -----------------------------
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
@@ -126,6 +114,7 @@ def update_node(data: SensorUpdate):
     node = parking_collection.find_one({"node_id": data.node_id})
     if not node:
         node = create_default_node(data.node_id)
+        parking_collection.insert_one(node)
 
     previous_status = node["sensor_status"]
 
@@ -134,22 +123,17 @@ def update_node(data: SensorUpdate):
     # ---- SESSION START ----
     if previous_status == "FREE" and data.sensor_status == "OCCUPIED":
         node["active_session_start"] = now
-        print(f"[SESSION START] {data.node_id}")
 
     # ---- SESSION END ----
     if previous_status == "OCCUPIED" and data.sensor_status == "FREE":
         if node.get("active_session_start"):
             duration = now - node["active_session_start"]
-
             sessions_collection.insert_one({
                 "node_id": data.node_id,
                 "start_time": node["active_session_start"],
                 "end_time": now,
                 "duration_seconds": duration
             })
-
-            print(f"[SESSION END] {data.node_id} | {duration}s")
-
         node["active_session_start"] = None
 
     node.update({
@@ -167,8 +151,7 @@ def update_node(data: SensorUpdate):
 
     parking_collection.update_one(
         {"node_id": data.node_id},
-        {"$set": node},
-        upsert=True
+        {"$set": node}
     )
 
     history_collection.insert_one({
@@ -185,11 +168,12 @@ def update_node(data: SensorUpdate):
 # -----------------------------
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest):
+    now = int(time.time())
+
     node = parking_collection.find_one({"node_id": req.node_id})
     if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-
-    now = int(time.time())
+        node = create_default_node(req.node_id)
+        parking_collection.insert_one(node)
 
     if node["admin_mode"] == "MAINTENANCE":
         raise HTTPException(status_code=400, detail="Node in maintenance")
@@ -229,7 +213,8 @@ def reserve_space(req: ReservationRequest):
 def set_maintenance(node_id: str):
     node = parking_collection.find_one({"node_id": node_id})
     if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+        node = create_default_node(node_id)
+        parking_collection.insert_one(node)
 
     parking_collection.update_one(
         {"node_id": node_id},
@@ -255,7 +240,8 @@ def set_maintenance(node_id: str):
 def resume_normal(node_id: str):
     node = parking_collection.find_one({"node_id": node_id})
     if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+        node = create_default_node(node_id)
+        parking_collection.insert_one(node)
 
     parking_collection.update_one(
         {"node_id": node_id},
@@ -267,6 +253,16 @@ def resume_normal(node_id: str):
     )
 
     return {"status": "ok"}
+
+# -----------------------------
+# Gateway Bootstrap
+# -----------------------------
+@app.get("/api/nodes")
+def get_nodes():
+    return [
+        node["node_id"]
+        for node in parking_collection.find({}, {"_id": 0, "node_id": 1})
+    ]
 
 # -----------------------------
 # Parking Status (AUTHORITATIVE)
