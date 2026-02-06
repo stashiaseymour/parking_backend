@@ -36,28 +36,50 @@ class QRCheckinRequest(BaseModel):
     qr_token: str
 
 # -----------------------------
-# Storage
+# Storage (RAM)
 # -----------------------------
 parking_states: Dict[str, dict] = {}
 RESERVATION_DURATION = 30  # seconds (testing)
 
 # -----------------------------
+# INITIAL PARKING SPACES
+# -----------------------------
+def initialize_parking_spaces():
+    default_nodes = ["A1", "A2", "A3"]
+
+    for node_id in default_nodes:
+        if node_id not in parking_states:
+            parking_states[node_id] = {
+                "sensor_status": "FREE",
+                "distance_cm": 0.0,
+                "reserved": False,
+                "violation": False,
+                "reservation_start": None,
+                "reservation_expiry": None,
+                "admin_mode": "NORMAL",
+                "last_update": None,
+                "qr_token": None,
+                "checked_in": False,
+                "checkin_time": None,
+                "final_status": "CLEAR"
+            }
+
+# Run once when server starts
+initialize_parking_spaces()
+
+# -----------------------------
 # FINAL DECISION LOGIC
 # -----------------------------
 def compute_final(sensor_status: str, reserved: bool, admin_mode: str, checked_in: bool) -> str:
-    # 1️⃣ Maintenance overrides everything
     if admin_mode == "MAINTENANCE":
         return "MAINTENANCE"
 
-    # 2️⃣ Violation = reserved + occupied + NOT checked in
     if reserved and not checked_in and sensor_status == "OCCUPIED":
         return "VIOLATION"
 
-    # 3️⃣ Reserved but not occupied
     if reserved:
         return "RESERVED"
 
-    # 4️⃣ No override
     return "CLEAR"
 
 # -----------------------------
@@ -82,21 +104,7 @@ def enforce_expiry(node: dict):
 def update_node(data: SensorUpdate):
     now = int(time.time())
 
-    node = parking_states.setdefault(data.node_id, {
-        "sensor_status": "FREE",
-        "distance_cm": 0.0,
-        "reserved": False,
-        "violation": False,
-        "reservation_start": None,
-        "reservation_expiry": None,
-        "admin_mode": "NORMAL",
-        "last_update": None,
-
-        # 🔑 QR additions
-        "qr_token": None,
-        "checked_in": False,
-        "checkin_time": None
-    })
+    node = parking_states.setdefault(data.node_id, parking_states.get(data.node_id, {}))
 
     enforce_expiry(node)
 
@@ -104,7 +112,6 @@ def update_node(data: SensorUpdate):
     node["distance_cm"] = data.distance_cm
     node["last_update"] = now
 
-    # Violation logic
     node["violation"] = (
         node["admin_mode"] == "NORMAL"
         and node["reserved"]
@@ -147,8 +154,6 @@ def reserve_space(req: ReservationRequest):
         node["reserved"] = True
         node["reservation_start"] = now
         node["reservation_expiry"] = now + RESERVATION_DURATION
-
-        # 🔑 Generate QR token
         node["qr_token"] = str(uuid.uuid4())
         node["checked_in"] = False
         node["checkin_time"] = None
@@ -177,7 +182,7 @@ def reserve_space(req: ReservationRequest):
     }
 
 # -----------------------------
-# QR CHECK-IN (ENTRANCE)
+# QR CHECK-IN
 # -----------------------------
 @app.post("/api/checkin")
 def qr_checkin(req: QRCheckinRequest):
@@ -196,7 +201,6 @@ def qr_checkin(req: QRCheckinRequest):
     if req.qr_token != node["qr_token"]:
         raise HTTPException(status_code=401, detail="Invalid QR code")
 
-    # ✅ Successful check-in
     node["checked_in"] = True
     node["checkin_time"] = int(time.time())
 
@@ -212,7 +216,7 @@ def qr_checkin(req: QRCheckinRequest):
     return {"status": "checked_in"}
 
 # -----------------------------
-# ADMIN: Maintenance ON
+# ADMIN: Maintenance
 # -----------------------------
 @app.post("/api/admin/maintenance/{node_id}")
 def set_maintenance(node_id: str):
@@ -228,7 +232,6 @@ def set_maintenance(node_id: str):
     node["qr_token"] = None
     node["checked_in"] = False
     node["checkin_time"] = None
-
     node["final_status"] = "MAINTENANCE"
 
     print(f"[ADMIN] {node_id} → MAINTENANCE")
