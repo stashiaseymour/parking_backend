@@ -9,10 +9,9 @@ from pymongo import MongoClient
 app = FastAPI(title="Smart Parking Backend")
 
 # -----------------------------
-# MongoDB Setup (RENDER SAFE)
+# MongoDB Setup (Render-safe)
 # -----------------------------
 MONGO_URI = os.environ.get("MONGO_URI")
-
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI environment variable not set")
 
@@ -64,7 +63,7 @@ def create_default_node(node_id: str):
         "reservation_start": None,
         "reservation_expiry": None,
         "admin_mode": "NORMAL",
-        "last_update": None,
+        "last_update": int(time.time()),
         "qr_token": None,
         "checked_in": False,
         "checkin_time": None,
@@ -82,7 +81,7 @@ def initialize_parking_spaces():
 initialize_parking_spaces()
 
 # -----------------------------
-# FINAL DECISION LOGIC
+# Final Decision Logic
 # -----------------------------
 def compute_final(sensor_status, reserved, admin_mode, checked_in):
     if admin_mode == "MAINTENANCE":
@@ -94,24 +93,32 @@ def compute_final(sensor_status, reserved, admin_mode, checked_in):
     return "CLEAR"
 
 # -----------------------------
-# Expiry Enforcement
+# Expiry Enforcement (FIXED)
 # -----------------------------
 def enforce_expiry(node):
     now = int(time.time())
+
     if node["reserved"] and node["reservation_expiry"]:
         if now >= node["reservation_expiry"]:
-            node.update({
-                "reserved": False,
-                "reservation_start": None,
-                "reservation_expiry": None,
-                "violation": False,
-                "qr_token": None,
-                "checked_in": False,
-                "checkin_time": None
-            })
+            parking_collection.update_one(
+                {"node_id": node["node_id"]},
+                {"$set": {
+                    "reserved": False,
+                    "reservation_start": None,
+                    "reservation_expiry": None,
+                    "violation": False,
+                    "qr_token": None,
+                    "checked_in": False,
+                    "checkin_time": None,
+                    "final_status": "CLEAR",
+                    "last_update": now
+                }}
+            )
+            return True
+    return False
 
 # -----------------------------
-# Sensor Update
+# Sensor Update (Gateway)
 # -----------------------------
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
@@ -159,7 +166,7 @@ def update_node(data: SensorUpdate):
     return {"status": "ok"}
 
 # -----------------------------
-# Reservation
+# Reservation (Website)
 # -----------------------------
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest):
@@ -210,68 +217,17 @@ def reserve_space(req: ReservationRequest):
     }
 
 # -----------------------------
-# ADMIN: Maintenance
-# -----------------------------
-@app.post("/api/admin/maintenance/{node_id}")
-def set_maintenance(node_id: str):
-    node = parking_collection.find_one({"node_id": node_id})
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-
-    node.update({
-        "admin_mode": "MAINTENANCE",
-        "reserved": False,
-        "violation": False,
-        "reservation_start": None,
-        "reservation_expiry": None,
-        "qr_token": None,
-        "checked_in": False,
-        "checkin_time": None,
-        "final_status": "MAINTENANCE",
-        "last_update": int(time.time())
-    })
-
-    parking_collection.update_one(
-        {"node_id": node_id},
-        {"$set": node}
-    )
-
-    return {"status": "ok"}
-
-# -----------------------------
-# ADMIN: Resume NORMAL
-# -----------------------------
-@app.post("/api/admin/resume/{node_id}")
-def resume_normal(node_id: str):
-    node = parking_collection.find_one({"node_id": node_id})
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-
-    node["admin_mode"] = "NORMAL"
-    node["violation"] = False
-    node["last_update"] = int(time.time())
-    node["final_status"] = compute_final(
-        node["sensor_status"],
-        node["reserved"],
-        node["admin_mode"],
-        node["checked_in"]
-    )
-
-    parking_collection.update_one(
-        {"node_id": node_id},
-        {"$set": node}
-    )
-
-    return {"status": "ok"}
-
-# -----------------------------
-# Parking Status
+# Parking Status (Website + Gateway)
 # -----------------------------
 @app.get("/api/parking/status")
 def get_status():
     out = {}
+
     for node in parking_collection.find():
-        enforce_expiry(node)
+        expired = enforce_expiry(node)
+        if expired:
+            node = parking_collection.find_one({"node_id": node["node_id"]})
+
         out[node["node_id"]] = {
             "final_status": node["final_status"],
             "sensor_status": node["sensor_status"],
@@ -283,4 +239,5 @@ def get_status():
             "admin_mode": node["admin_mode"],
             "server_timestamp": node["last_update"]
         }
+
     return out
