@@ -146,6 +146,7 @@ def reserve_space(req: ReservationRequest):
 
     node = parking_states[req.node_id]
     now = int(time.time())
+    node["last_update"] = now
 
     if node["admin_mode"] == "MAINTENANCE":
         raise HTTPException(status_code=400, detail="Node in maintenance")
