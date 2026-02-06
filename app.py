@@ -17,8 +17,10 @@ if not MONGO_URI:
 
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["smart_parking"]
+
 parking_collection = db["parking_spaces"]
 history_collection = db["history"]
+sessions_collection = db["parking_sessions"]  # ✅ NEW
 
 # -----------------------------
 # CORS
@@ -67,7 +69,8 @@ def create_default_node(node_id: str):
         "qr_token": None,
         "checked_in": False,
         "checkin_time": None,
-        "final_status": "CLEAR"
+        "final_status": "CLEAR",
+        "active_session_start": None  # ✅ NEW
     }
 
 # -----------------------------
@@ -93,7 +96,7 @@ def compute_final(sensor_status, reserved, admin_mode, checked_in):
     return "CLEAR"
 
 # -----------------------------
-# Expiry Enforcement (FIXED)
+# Expiry Enforcement (unchanged)
 # -----------------------------
 def enforce_expiry(node):
     now = int(time.time())
@@ -118,7 +121,7 @@ def enforce_expiry(node):
     return False
 
 # -----------------------------
-# Sensor Update (Gateway)
+# Sensor Update (Gateway + SESSIONS)
 # -----------------------------
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
@@ -128,8 +131,38 @@ def update_node(data: SensorUpdate):
     if not node:
         node = create_default_node(data.node_id)
 
+    previous_status = node["sensor_status"]
+
     enforce_expiry(node)
 
+    # -----------------------------
+    # SESSION START (FREE → OCCUPIED)
+    # -----------------------------
+    if previous_status == "FREE" and data.sensor_status == "OCCUPIED":
+        node["active_session_start"] = now
+        print(f"[SESSION START] {data.node_id}")
+
+    # -----------------------------
+    # SESSION END (OCCUPIED → FREE)
+    # -----------------------------
+    if previous_status == "OCCUPIED" and data.sensor_status == "FREE":
+        if node.get("active_session_start"):
+            duration = now - node["active_session_start"]
+
+            sessions_collection.insert_one({
+                "node_id": data.node_id,
+                "start_time": node["active_session_start"],
+                "end_time": now,
+                "duration_seconds": duration
+            })
+
+            print(f"[SESSION END] {data.node_id} | {duration}s")
+
+        node["active_session_start"] = None
+
+    # -----------------------------
+    # Normal Node Update (unchanged)
+    # -----------------------------
     node.update({
         "sensor_status": data.sensor_status,
         "distance_cm": data.distance_cm,
@@ -166,7 +199,7 @@ def update_node(data: SensorUpdate):
     return {"status": "ok"}
 
 # -----------------------------
-# Reservation (Website)
+# Reservation (Website) – unchanged
 # -----------------------------
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest):
