@@ -294,3 +294,76 @@ def get_status():
         }
 
     return out
+
+# =====================================================
+# =============== ADMIN ANALYTICS =====================
+# =====================================================
+
+# -----------------------------
+# Usage by Node
+# -----------------------------
+@app.get("/api/admin/analytics/usage-by-node")
+def usage_by_node():
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$node_id",
+                "total_sessions": {"$sum": 1},
+                "total_time": {"$sum": "$duration_seconds"},
+                "avg_time": {"$avg": "$duration_seconds"}
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "node_id": "$_id",
+                "total_sessions": 1,
+                "total_time_seconds": "$total_time",
+                "average_time_seconds": {"$round": ["$avg_time", 1]}
+            }
+        }
+    ]
+
+    return list(sessions_collection.aggregate(pipeline))
+
+# -----------------------------
+# Overall Usage Summary
+# -----------------------------
+@app.get("/api/admin/analytics/summary")
+def usage_summary():
+    result = list(sessions_collection.aggregate([
+        {
+            "$group": {
+                "_id": None,
+                "total_sessions": {"$sum": 1},
+                "total_time": {"$sum": "$duration_seconds"},
+                "avg_time": {"$avg": "$duration_seconds"}
+            }
+        }
+    ]))
+
+    if not result:
+        return {
+            "total_sessions": 0,
+            "total_time_seconds": 0,
+            "average_time_seconds": 0
+        }
+
+    r = result[0]
+    return {
+        "total_sessions": r["total_sessions"],
+        "total_time_seconds": r["total_time"],
+        "average_time_seconds": round(r["avg_time"], 1)
+    }
+
+# -----------------------------
+# Recent Parking Sessions
+# -----------------------------
+@app.get("/api/admin/analytics/recent-sessions")
+def recent_sessions(limit: int = 10):
+    sessions = sessions_collection.find(
+        {},
+        {"_id": 0}
+    ).sort("end_time", -1).limit(limit)
+
+    return list(sessions)
