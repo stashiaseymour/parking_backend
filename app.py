@@ -240,6 +240,17 @@ def get_status():
         }
     return out
 
+
+# =====================================================
+# GATEWAY BOOTSTRAP (ADDED - DOES NOT MODIFY EXISTING LOGIC)
+# =====================================================
+@app.get("/api/nodes")
+def get_nodes():
+    return [
+        node["node_id"]
+        for node in parking_collection.find({}, {"_id": 0, "node_id": 1})
+    ]
+
 # =====================================================
 # ADMIN CONTROLS
 # =====================================================
