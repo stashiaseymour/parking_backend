@@ -1,31 +1,29 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import time
-import uuid
-import os
 from pymongo import MongoClient
 from datetime import datetime, timezone, timedelta
+import time, uuid, os
 
 app = FastAPI(title="Smart Parking Backend")
 
-# -----------------------------
-# MongoDB Setup
-# -----------------------------
+# =====================================================
+# MongoDB
+# =====================================================
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
-    raise RuntimeError("MONGO_URI environment variable not set")
+    raise RuntimeError("MONGO_URI not set")
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["smart_parking"]
+client = MongoClient(MONGO_URI)
+db = client["smart_parking"]
 
-parking_collection = db["parking_spaces"]
-history_collection = db["history"]
+parking_collection  = db["parking_spaces"]
+history_collection  = db["history"]
 sessions_collection = db["parking_sessions"]
 
-# -----------------------------
+# =====================================================
 # CORS
-# -----------------------------
+# =====================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,9 +32,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
+# =====================================================
 # Models
-# -----------------------------
+# =====================================================
 class SensorUpdate(BaseModel):
     node_id: str
     sensor_status: str
@@ -47,31 +45,36 @@ class ReservationRequest(BaseModel):
     node_id: str
     reserved: bool
 
-# -----------------------------
+# =====================================================
 # Constants
-# -----------------------------
+# =====================================================
 RESERVATION_DURATION = 30  # seconds (testing)
 
-# -----------------------------
+# =====================================================
 # Time Helpers
-# -----------------------------
-def ts_to_readable(ts: int):
+# =====================================================
+def now_ts():
+    return int(time.time())
+
+def ts_to_readable(ts: int | None):
     if not ts:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
 
 def start_of_today():
-    now = datetime.now(timezone.utc)
-    return int(datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp())
+    d = datetime.now(timezone.utc)
+    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
 
 def start_of_week():
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=now.weekday())
-    return int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp())
+    d = datetime.now(timezone.utc)
+    d = d - timedelta(days=d.weekday())
+    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
 
-# -----------------------------
-# Default Node Template
-# -----------------------------
+# =====================================================
+# Default Node
+# =====================================================
 def create_default_node(node_id: str):
     return {
         "node_id": node_id,
@@ -82,81 +85,73 @@ def create_default_node(node_id: str):
         "reservation_start": None,
         "reservation_expiry": None,
         "admin_mode": "NORMAL",
-        "last_update": int(time.time()),
         "qr_token": None,
         "checked_in": False,
-        "checkin_time": None,
-        "active_session_start": None
+        "active_session_start": None,
+        "last_update": now_ts()
     }
 
-# -----------------------------
-# Final Decision Logic
-# -----------------------------
-def compute_final(sensor_status, reserved, admin_mode, checked_in):
-    if admin_mode == "MAINTENANCE":
+# =====================================================
+# Core Logic
+# =====================================================
+def compute_final(node):
+    if node["admin_mode"] == "MAINTENANCE":
         return "MAINTENANCE"
-    if reserved and not checked_in and sensor_status == "OCCUPIED":
+    if node["reserved"] and not node["checked_in"] and node["sensor_status"] == "OCCUPIED":
         return "VIOLATION"
-    if reserved:
+    if node["reserved"]:
         return "RESERVED"
-    return "CLEAR"
+    return node["sensor_status"]
 
-# -----------------------------
-# Expiry Enforcement
-# -----------------------------
 def enforce_expiry(node):
-    now = int(time.time())
     if node["reserved"] and node["reservation_expiry"]:
-        if now >= node["reservation_expiry"]:
+        if now_ts() >= node["reservation_expiry"]:
             parking_collection.update_one(
                 {"node_id": node["node_id"]},
                 {"$set": {
                     "reserved": False,
                     "reservation_start": None,
                     "reservation_expiry": None,
-                    "violation": False,
                     "qr_token": None,
+                    "violation": False,
                     "checked_in": False,
-                    "checkin_time": None,
-                    "last_update": now
+                    "last_update": now_ts()
                 }}
             )
 
-# -----------------------------
+# =====================================================
 # Sensor Update (Gateway)
-# -----------------------------
+# =====================================================
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
-    now = int(time.time())
-
     node = parking_collection.find_one({"node_id": data.node_id})
     if not node:
         node = create_default_node(data.node_id)
         parking_collection.insert_one(node)
 
-    previous_status = node["sensor_status"]
     enforce_expiry(node)
 
-    # SESSION START
-    if previous_status == "FREE" and data.sensor_status == "OCCUPIED":
-        node["active_session_start"] = now
+    prev = node["sensor_status"]
 
-    # SESSION END
-    if previous_status == "OCCUPIED" and data.sensor_status == "FREE":
+    # Session start
+    if prev == "FREE" and data.sensor_status == "OCCUPIED":
+        node["active_session_start"] = now_ts()
+
+    # Session end
+    if prev == "OCCUPIED" and data.sensor_status == "FREE":
         if node.get("active_session_start"):
-            duration = now - node["active_session_start"]
             sessions_collection.insert_one({
                 "node_id": data.node_id,
                 "start_time": node["active_session_start"],
-                "end_time": now,
-                "duration_seconds": duration
+                "end_time": now_ts(),
+                "duration_seconds": now_ts() - node["active_session_start"]
             })
         node["active_session_start"] = None
 
     node.update({
         "sensor_status": data.sensor_status,
         "distance_cm": data.distance_cm,
-        "last_update": now
+        "last_update": now_ts()
     })
 
     node["violation"] = (
@@ -166,45 +161,40 @@ def update_node(data: SensorUpdate):
         and data.sensor_status == "OCCUPIED"
     )
 
-    parking_collection.update_one(
-        {"node_id": data.node_id},
-        {"$set": node}
-    )
+    parking_collection.update_one({"node_id": data.node_id}, {"$set": node})
 
     history_collection.insert_one({
         "node_id": data.node_id,
         "sensor_status": data.sensor_status,
         "distance_cm": data.distance_cm,
-        "timestamp": now
+        "timestamp": now_ts()
     })
 
     return {"status": "ok"}
 
-# -----------------------------
-# Reservation
-# -----------------------------
+# =====================================================
+# Reservation (QR generation)
+# =====================================================
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest):
-    now = int(time.time())
-
     node = parking_collection.find_one({"node_id": req.node_id})
     if not node:
         node = create_default_node(req.node_id)
         parking_collection.insert_one(node)
 
     if node["admin_mode"] == "MAINTENANCE":
-        raise HTTPException(status_code=400, detail="Node in maintenance")
+        raise HTTPException(400, "Node in maintenance")
 
     if req.reserved:
         parking_collection.update_one(
             {"node_id": req.node_id},
             {"$set": {
                 "reserved": True,
-                "reservation_start": now,
-                "reservation_expiry": now + RESERVATION_DURATION,
+                "reservation_start": now_ts(),
+                "reservation_expiry": now_ts() + RESERVATION_DURATION,
                 "qr_token": str(uuid.uuid4()),
                 "checked_in": False,
-                "last_update": now
+                "last_update": now_ts()
             }}
         )
     else:
@@ -214,52 +204,73 @@ def reserve_space(req: ReservationRequest):
                 "reserved": False,
                 "reservation_start": None,
                 "reservation_expiry": None,
-                "violation": False,
                 "qr_token": None,
+                "violation": False,
                 "checked_in": False,
-                "last_update": now
+                "last_update": now_ts()
             }}
         )
 
     return {"status": "ok"}
 
-# -----------------------------
-# Parking Status  ✅ FIXED
-# -----------------------------
+# =====================================================
+# STATUS (User + Admin)
+# =====================================================
 @app.get("/api/parking/status")
 def get_status():
     out = {}
     for node in parking_collection.find():
         enforce_expiry(node)
 
-        final_status = compute_final(
-            node["sensor_status"],
-            node["reserved"],
-            node["admin_mode"],
-            node["checked_in"]
-        )
-
         out[node["node_id"]] = {
-            "final_status": final_status,
+            "final_status": compute_final(node),
             "sensor_status": node["sensor_status"],
             "distance_cm": node["distance_cm"],
             "reserved": node["reserved"],
             "violation": node["violation"],
             "admin_mode": node["admin_mode"],
 
-            # ✅ REQUIRED FOR USER PAGE
+            # USER PAGE NEEDS THESE
             "qr_token": node.get("qr_token"),
             "reservation_expiry": node.get("reservation_expiry"),
 
+            # TIME
+            "server_timestamp": node["last_update"],
             "last_update_readable": ts_to_readable(node["last_update"])
         }
-
     return out
 
 # =====================================================
-# ADMIN ANALYTICS (UNCHANGED)
+# ADMIN CONTROLS
 # =====================================================
+@app.post("/api/admin/maintenance/{node_id}")
+def admin_maintenance(node_id: str):
+    parking_collection.update_one(
+        {"node_id": node_id},
+        {"$set": {
+            "admin_mode": "MAINTENANCE",
+            "reserved": False,
+            "qr_token": None,
+            "violation": False,
+            "last_update": now_ts()
+        }}
+    )
+    return {"status": "ok"}
 
+@app.post("/api/admin/resume/{node_id}")
+def admin_resume(node_id: str):
+    parking_collection.update_one(
+        {"node_id": node_id},
+        {"$set": {
+            "admin_mode": "NORMAL",
+            "last_update": now_ts()
+        }}
+    )
+    return {"status": "ok"}
+
+# =====================================================
+# ADMIN ANALYTICS
+# =====================================================
 @app.get("/api/admin/analytics/usage-by-node")
 def usage_by_node(range: str | None = None):
     match = {}
@@ -273,23 +284,19 @@ def usage_by_node(range: str | None = None):
         pipeline.append({"$match": match})
 
     pipeline.extend([
-        {
-            "$group": {
-                "_id": "$node_id",
-                "total_sessions": {"$sum": 1},
-                "total_time": {"$sum": "$duration_seconds"},
-                "avg_time": {"$avg": "$duration_seconds"}
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "node_id": "$_id",
-                "total_sessions": 1,
-                "total_time_seconds": "$total_time",
-                "average_time_seconds": {"$round": ["$avg_time", 1]}
-            }
-        }
+        {"$group": {
+            "_id": "$node_id",
+            "total_sessions": {"$sum": 1},
+            "total_time": {"$sum": "$duration_seconds"},
+            "avg_time": {"$avg": "$duration_seconds"}
+        }},
+        {"$project": {
+            "_id": 0,
+            "node_id": "$_id",
+            "total_sessions": 1,
+            "total_time_seconds": "$total_time",
+            "average_time_seconds": {"$round": ["$avg_time", 1]}
+        }}
     ])
 
     return list(sessions_collection.aggregate(pipeline))
@@ -306,20 +313,18 @@ def usage_summary(range: str | None = None):
     if match:
         pipeline.append({"$match": match})
 
-    pipeline.append({
-        "$group": {
-            "_id": None,
-            "total_sessions": {"$sum": 1},
-            "total_time": {"$sum": "$duration_seconds"},
-            "avg_time": {"$avg": "$duration_seconds"}
-        }
-    })
+    pipeline.append({"$group": {
+        "_id": None,
+        "total_sessions": {"$sum": 1},
+        "total_time": {"$sum": "$duration_seconds"},
+        "avg_time": {"$avg": "$duration_seconds"}
+    }})
 
-    result = list(sessions_collection.aggregate(pipeline))
-    if not result:
+    r = list(sessions_collection.aggregate(pipeline))
+    if not r:
         return {"total_sessions": 0, "total_time_seconds": 0, "average_time_seconds": 0}
 
-    r = result[0]
+    r = r[0]
     return {
         "total_sessions": r["total_sessions"],
         "total_time_seconds": r["total_time"],
@@ -334,10 +339,13 @@ def recent_sessions(limit: int = 10, range: str | None = None):
     elif range == "week":
         query["end_time"] = {"$gte": start_of_week()}
 
-    sessions = sessions_collection.find(query, {"_id": 0}).sort("end_time", -1).limit(limit)
-
     out = []
-    for s in sessions:
+    for s in (
+        sessions_collection
+        .find(query, {"_id": 0})
+        .sort("end_time", -1)
+        .limit(limit)
+    ):
         s["start_time_readable"] = ts_to_readable(s["start_time"])
         s["end_time_readable"] = ts_to_readable(s["end_time"])
         out.append(s)
