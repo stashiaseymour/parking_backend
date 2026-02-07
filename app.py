@@ -224,7 +224,7 @@ def reserve_space(req: ReservationRequest):
     return {"status": "ok"}
 
 # -----------------------------
-# Parking Status
+# Parking Status  ✅ FIXED
 # -----------------------------
 @app.get("/api/parking/status")
 def get_status():
@@ -246,12 +246,18 @@ def get_status():
             "reserved": node["reserved"],
             "violation": node["violation"],
             "admin_mode": node["admin_mode"],
+
+            # ✅ REQUIRED FOR USER PAGE
+            "qr_token": node.get("qr_token"),
+            "reservation_expiry": node.get("reservation_expiry"),
+
             "last_update_readable": ts_to_readable(node["last_update"])
         }
+
     return out
 
 # =====================================================
-# ADMIN ANALYTICS
+# ADMIN ANALYTICS (UNCHANGED)
 # =====================================================
 
 @app.get("/api/admin/analytics/usage-by-node")
