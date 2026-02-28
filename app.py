@@ -40,6 +40,7 @@ class SensorUpdate(BaseModel):
     sensor_status: str
     distance_cm: float
     timestamp: int
+    seq: int   # ✅ ADDED
 
 class ReservationRequest(BaseModel):
     node_id: str
@@ -88,7 +89,8 @@ def create_default_node(node_id: str):
         "qr_token": None,
         "checked_in": False,
         "active_session_start": None,
-        "last_update": now_ts()
+        "last_update": now_ts(),
+        "last_seq": 0   # ✅ ADDED
     }
 
 # =====================================================
@@ -124,10 +126,15 @@ def enforce_expiry(node):
 # =====================================================
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
+
     node = parking_collection.find_one({"node_id": data.node_id})
     if not node:
         node = create_default_node(data.node_id)
         parking_collection.insert_one(node)
+
+    # ✅ SEQUENCE PROTECTION (ignore old packets)
+    if data.seq <= node.get("last_seq", 0):
+        return {"status": "ignored_old_packet"}
 
     enforce_expiry(node)
 
@@ -151,7 +158,8 @@ def update_node(data: SensorUpdate):
     node.update({
         "sensor_status": data.sensor_status,
         "distance_cm": data.distance_cm,
-        "last_update": now_ts()
+        "last_update": now_ts(),
+        "last_seq": data.seq   # ✅ ADDED
     })
 
     node["violation"] = (
@@ -161,7 +169,18 @@ def update_node(data: SensorUpdate):
         and data.sensor_status == "OCCUPIED"
     )
 
-    parking_collection.update_one({"node_id": data.node_id}, {"$set": node})
+    # ✅ SAFE FIELD UPDATE (no full document overwrite)
+    parking_collection.update_one(
+        {"node_id": data.node_id},
+        {"$set": {
+            "sensor_status": node["sensor_status"],
+            "distance_cm": node["distance_cm"],
+            "last_update": node["last_update"],
+            "violation": node["violation"],
+            "active_session_start": node.get("active_session_start"),
+            "last_seq": node["last_seq"]
+        }}
+    )
 
     history_collection.insert_one({
         "node_id": data.node_id,
@@ -229,20 +248,15 @@ def get_status():
             "reserved": node["reserved"],
             "violation": node["violation"],
             "admin_mode": node["admin_mode"],
-
-            # USER PAGE NEEDS THESE
             "qr_token": node.get("qr_token"),
             "reservation_expiry": node.get("reservation_expiry"),
-
-            # TIME
             "server_timestamp": node["last_update"],
             "last_update_readable": ts_to_readable(node["last_update"])
         }
     return out
 
-
 # =====================================================
-# GATEWAY BOOTSTRAP (ADDED - DOES NOT MODIFY EXISTING LOGIC)
+# GATEWAY BOOTSTRAP
 # =====================================================
 @app.get("/api/nodes")
 def get_nodes():
