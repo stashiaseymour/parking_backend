@@ -40,7 +40,6 @@ class SensorUpdate(BaseModel):
     sensor_status: str
     distance_cm: float
     timestamp: int
-    seq: int   # ✅ ADDED
 
 class ReservationRequest(BaseModel):
     node_id: str
@@ -89,8 +88,7 @@ def create_default_node(node_id: str):
         "qr_token": None,
         "checked_in": False,
         "active_session_start": None,
-        "last_update": now_ts(),
-        "last_seq": 0   # ✅ ADDED
+        "last_update": now_ts()
     }
 
 # =====================================================
@@ -132,10 +130,6 @@ def update_node(data: SensorUpdate):
         node = create_default_node(data.node_id)
         parking_collection.insert_one(node)
 
-    # ✅ SEQUENCE PROTECTION (ignore old packets)
-    if data.seq <= node.get("last_seq", 0):
-        return {"status": "ignored_old_packet"}
-
     enforce_expiry(node)
 
     prev = node["sensor_status"]
@@ -158,8 +152,7 @@ def update_node(data: SensorUpdate):
     node.update({
         "sensor_status": data.sensor_status,
         "distance_cm": data.distance_cm,
-        "last_update": now_ts(),
-        "last_seq": data.seq   # ✅ ADDED
+        "last_update": now_ts()
     })
 
     node["violation"] = (
@@ -169,7 +162,6 @@ def update_node(data: SensorUpdate):
         and data.sensor_status == "OCCUPIED"
     )
 
-    # ✅ SAFE FIELD UPDATE (no full document overwrite)
     parking_collection.update_one(
         {"node_id": data.node_id},
         {"$set": {
@@ -177,8 +169,7 @@ def update_node(data: SensorUpdate):
             "distance_cm": node["distance_cm"],
             "last_update": node["last_update"],
             "violation": node["violation"],
-            "active_session_start": node.get("active_session_start"),
-            "last_seq": node["last_seq"]
+            "active_session_start": node.get("active_session_start")
         }}
     )
 
@@ -192,7 +183,7 @@ def update_node(data: SensorUpdate):
     return {"status": "ok"}
 
 # =====================================================
-# Reservation (QR generation)
+# Reservation
 # =====================================================
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest):
@@ -233,7 +224,7 @@ def reserve_space(req: ReservationRequest):
     return {"status": "ok"}
 
 # =====================================================
-# STATUS (User + Admin)
+# STATUS
 # =====================================================
 @app.get("/api/parking/status")
 def get_status():
@@ -256,7 +247,7 @@ def get_status():
     return out
 
 # =====================================================
-# GATEWAY BOOTSTRAP
+# NODE LIST
 # =====================================================
 @app.get("/api/nodes")
 def get_nodes():
@@ -264,115 +255,3 @@ def get_nodes():
         node["node_id"]
         for node in parking_collection.find({}, {"_id": 0, "node_id": 1})
     ]
-
-# =====================================================
-# ADMIN CONTROLS
-# =====================================================
-@app.post("/api/admin/maintenance/{node_id}")
-def admin_maintenance(node_id: str):
-    parking_collection.update_one(
-        {"node_id": node_id},
-        {"$set": {
-            "admin_mode": "MAINTENANCE",
-            "reserved": False,
-            "qr_token": None,
-            "violation": False,
-            "last_update": now_ts()
-        }}
-    )
-    return {"status": "ok"}
-
-@app.post("/api/admin/resume/{node_id}")
-def admin_resume(node_id: str):
-    parking_collection.update_one(
-        {"node_id": node_id},
-        {"$set": {
-            "admin_mode": "NORMAL",
-            "last_update": now_ts()
-        }}
-    )
-    return {"status": "ok"}
-
-# =====================================================
-# ADMIN ANALYTICS
-# =====================================================
-@app.get("/api/admin/analytics/usage-by-node")
-def usage_by_node(range: str | None = None):
-    match = {}
-    if range == "today":
-        match["end_time"] = {"$gte": start_of_today()}
-    elif range == "week":
-        match["end_time"] = {"$gte": start_of_week()}
-
-    pipeline = []
-    if match:
-        pipeline.append({"$match": match})
-
-    pipeline.extend([
-        {"$group": {
-            "_id": "$node_id",
-            "total_sessions": {"$sum": 1},
-            "total_time": {"$sum": "$duration_seconds"},
-            "avg_time": {"$avg": "$duration_seconds"}
-        }},
-        {"$project": {
-            "_id": 0,
-            "node_id": "$_id",
-            "total_sessions": 1,
-            "total_time_seconds": "$total_time",
-            "average_time_seconds": {"$round": ["$avg_time", 1]}
-        }}
-    ])
-
-    return list(sessions_collection.aggregate(pipeline))
-
-@app.get("/api/admin/analytics/summary")
-def usage_summary(range: str | None = None):
-    match = {}
-    if range == "today":
-        match["end_time"] = {"$gte": start_of_today()}
-    elif range == "week":
-        match["end_time"] = {"$gte": start_of_week()}
-
-    pipeline = []
-    if match:
-        pipeline.append({"$match": match})
-
-    pipeline.append({"$group": {
-        "_id": None,
-        "total_sessions": {"$sum": 1},
-        "total_time": {"$sum": "$duration_seconds"},
-        "avg_time": {"$avg": "$duration_seconds"}
-    }})
-
-    r = list(sessions_collection.aggregate(pipeline))
-    if not r:
-        return {"total_sessions": 0, "total_time_seconds": 0, "average_time_seconds": 0}
-
-    r = r[0]
-    return {
-        "total_sessions": r["total_sessions"],
-        "total_time_seconds": r["total_time"],
-        "average_time_seconds": round(r["avg_time"], 1)
-    }
-
-@app.get("/api/admin/analytics/recent-sessions")
-def recent_sessions(limit: int = 10, range: str | None = None):
-    query = {}
-    if range == "today":
-        query["end_time"] = {"$gte": start_of_today()}
-    elif range == "week":
-        query["end_time"] = {"$gte": start_of_week()}
-
-    out = []
-    for s in (
-        sessions_collection
-        .find(query, {"_id": 0})
-        .sort("end_time", -1)
-        .limit(limit)
-    ):
-        s["start_time_readable"] = ts_to_readable(s["start_time"])
-        s["end_time_readable"] = ts_to_readable(s["end_time"])
-        out.append(s)
-
-    return out
