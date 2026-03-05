@@ -124,21 +124,24 @@ def enforce_expiry(node):
 # =====================================================
 @app.post("/api/node/update")
 def update_node(data: SensorUpdate):
-
     node = parking_collection.find_one({"node_id": data.node_id})
     if not node:
         node = create_default_node(data.node_id)
         parking_collection.insert_one(node)
+        node = parking_collection.find_one({"node_id": data.node_id})
 
     enforce_expiry(node)
+    
+    # Re-fetch after expiry enforcement so local dict is fresh
+    node = parking_collection.find_one({"node_id": data.node_id})
 
     prev = node["sensor_status"]
 
-    # Session start
-    if prev == "FREE" and data.sensor_status == "OCCUPIED":
-        node["active_session_start"] = now_ts()
+    session_update = {}
 
-    # Session end
+    if prev == "FREE" and data.sensor_status == "OCCUPIED":
+        session_update["active_session_start"] = now_ts()
+
     if prev == "OCCUPIED" and data.sensor_status == "FREE":
         if node.get("active_session_start"):
             sessions_collection.insert_one({
@@ -147,30 +150,27 @@ def update_node(data: SensorUpdate):
                 "end_time": now_ts(),
                 "duration_seconds": now_ts() - node["active_session_start"]
             })
-        node["active_session_start"] = None
+        session_update["active_session_start"] = None
 
-    node.update({
-        "sensor_status": data.sensor_status,
-        "distance_cm": data.distance_cm,
-        "last_update": now_ts()
-    })
-
-    node["violation"] = (
+    is_violation = (
         node["admin_mode"] == "NORMAL"
         and node["reserved"]
         and not node["checked_in"]
         and data.sensor_status == "OCCUPIED"
     )
 
+    # Build explicit $set dict — never pass full node with _id
+    update_fields = {
+        "sensor_status": data.sensor_status,
+        "distance_cm": data.distance_cm,
+        "last_update": now_ts(),
+        "violation": is_violation,
+        **session_update
+    }
+
     parking_collection.update_one(
         {"node_id": data.node_id},
-        {"$set": {
-            "sensor_status": node["sensor_status"],
-            "distance_cm": node["distance_cm"],
-            "last_update": node["last_update"],
-            "violation": node["violation"],
-            "active_session_start": node.get("active_session_start")
-        }}
+        {"$set": update_fields}  # ✅ clean dict, no _id
     )
 
     history_collection.insert_one({
