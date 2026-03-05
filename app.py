@@ -245,6 +245,42 @@ def get_status():
             "last_update_readable": ts_to_readable(node["last_update"])
         }
     return out
+# =====================================================
+# STATUS
+# =====================================================
+@app.get("/api/admin/analytics/summary")
+def usage_summary(range: str | None = None):
+    match = {}
+    if range == "today":
+        match["end_time"] = {"$gte": start_of_today()}
+    elif range == "week":
+        match["end_time"] = {"$gte": start_of_week()}
+
+    pipeline = []
+    if match:
+        pipeline.append({"$match": match})
+
+    pipeline.append({"$group": {
+        "_id": None,
+        "total_sessions": {"$sum": 1},
+        "total_time": {"$sum": "$duration_seconds"},
+        "avg_time": {"$avg": "$duration_seconds"}
+    }})
+
+    r = list(sessions_collection.aggregate(pipeline))
+    if not r:
+        return {
+            "total_sessions": 0,
+            "total_time_seconds": 0,
+            "average_time_seconds": 0
+        }
+
+    r = r[0]
+    return {
+        "total_sessions": r["total_sessions"],
+        "total_time_seconds": r["total_time"],
+        "average_time_seconds": round(r["avg_time"], 1)
+    }
 
 # =====================================================
 # NODE LIST
