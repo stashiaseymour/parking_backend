@@ -229,11 +229,15 @@ def reserve_space(req: ReservationRequest):
 @app.get("/api/parking/status")
 def get_status():
     out = {}
+    STALE_THRESHOLD = 30  # seconds
+
     for node in parking_collection.find():
         enforce_expiry(node)
 
+        is_stale = (now_ts() - node["last_update"]) > STALE_THRESHOLD
+
         out[node["node_id"]] = {
-            "final_status": compute_final(node),
+            "final_status": "OFFLINE" if is_stale else compute_final(node),
             "sensor_status": node["sensor_status"],
             "distance_cm": node["distance_cm"],
             "reserved": node["reserved"],
@@ -242,7 +246,8 @@ def get_status():
             "qr_token": node.get("qr_token"),
             "reservation_expiry": node.get("reservation_expiry"),
             "server_timestamp": node["last_update"],
-            "last_update_readable": ts_to_readable(node["last_update"])
+            "last_update_readable": ts_to_readable(node["last_update"]),
+            "online": not is_stale
         }
     return out
 # =====================================================
@@ -373,3 +378,16 @@ def recent_sessions(limit: int = 10, range: str | None = None):
         out.append(s)
 
     return out
+
+# =====================================================
+# SEED KNOWN NODES
+# =====================================================
+@app.post("/api/admin/seed-nodes")
+def seed_nodes():
+    known_nodes = ["A1", "A2", "A3", "O1"]
+    for node_id in known_nodes:
+        existing = parking_collection.find_one({"node_id": node_id})
+        if not existing:
+            node = create_default_node(node_id)
+            parking_collection.insert_one(node)
+    return {"status": "ok", "nodes": known_nodes}
