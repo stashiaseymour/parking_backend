@@ -229,7 +229,7 @@ def reserve_space(req: ReservationRequest):
 @app.get("/api/parking/status")
 def get_status():
     out = {}
-    STALE_THRESHOLD = 6000  # seconds (10 mins)
+    STALE_THRESHOLD = 600  # seconds (10 mins)
 
     for node in parking_collection.find():
         enforce_expiry(node)
