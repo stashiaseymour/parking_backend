@@ -55,7 +55,7 @@ class SensorUpdate(BaseModel):
 class ReservationRequest(BaseModel):
     node_id: str
     reserved: bool
-    duration_seconds: int = 3600  # default 1 hour
+    expiry_timestamp: int = 0
 
 class RegisterRequest(BaseModel):
     name: str
@@ -425,7 +425,7 @@ def reserve_space(req: ReservationRequest, credentials: HTTPAuthorizationCredent
             {"$set": {
                 "reserved": True,
                 "reservation_start": now_ts(),
-                "reservation_expiry": now_ts() + req.duration_seconds,
+                "reservation_expiry": req.expiry_timestamp if req.expiry_timestamp > 0 else now_ts() + 3600,
                 "reserved_by": user_id,
                 "qr_token": str(uuid.uuid4()),
                 "checked_in": False,
@@ -463,18 +463,19 @@ def get_status():
         is_stale = (now_ts() - node["last_update"]) > STALE_THRESHOLD
 
         out[node["node_id"]] = {
-            "final_status": "OFFLINE" if is_stale else compute_final(node),
-            "sensor_status": node["sensor_status"],
-            "distance_cm": node["distance_cm"],
-            "reserved": node["reserved"],
-            "violation": node["violation"],
-            "admin_mode": node["admin_mode"],
-            "qr_token": node.get("qr_token"),
-            "reservation_expiry": node.get("reservation_expiry"),
-            "server_timestamp": node["last_update"],
-            "last_update_readable": ts_to_readable(node["last_update"]),
-            "online": not is_stale
-        }
+    "final_status": "OFFLINE" if is_stale else compute_final(node),
+    "sensor_status": node["sensor_status"],
+    "distance_cm": node["distance_cm"],
+    "reserved": node["reserved"],
+    "violation": node["violation"],
+    "admin_mode": node["admin_mode"],
+    "qr_token": node.get("qr_token"),
+    "reservation_expiry": node.get("reservation_expiry"),
+    "reserved_by": node.get("reserved_by"),
+    "server_timestamp": node["last_update"],
+    "last_update_readable": ts_to_readable(node["last_update"]),
+    "online": not is_stale
+}
     return out
 
 
