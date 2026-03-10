@@ -1,3 +1,5 @@
 fastapi
 uvicorn
 pymongo
+bcrypt
+pyjwt
