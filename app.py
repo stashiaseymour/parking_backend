@@ -55,6 +55,7 @@ class SensorUpdate(BaseModel):
 class ReservationRequest(BaseModel):
     node_id: str
     reserved: bool
+    duration_seconds: int = 3600  # default 1 hour
 
 class RegisterRequest(BaseModel):
     name: str
@@ -424,7 +425,7 @@ def reserve_space(req: ReservationRequest, credentials: HTTPAuthorizationCredent
             {"$set": {
                 "reserved": True,
                 "reservation_start": now_ts(),
-                "reservation_expiry": now_ts() + RESERVATION_DURATION,
+                "reservation_expiry": now_ts() + req.duration_seconds,
                 "reserved_by": user_id,
                 "qr_token": str(uuid.uuid4()),
                 "checked_in": False,
