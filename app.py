@@ -495,7 +495,7 @@ def get_nodes():
 # =====================================================
 @app.post("/api/admin/seed-nodes")
 def seed_nodes():
-    known_nodes = ["A1", "A2", "A3", "O1"]
+    known_nodes = ["A1", "A2", "A3", "A5", "A6", "A7", "A8", "A9", "O1"]
     for node_id in known_nodes:
         if not parking_collection.find_one({"node_id": node_id}):
             parking_collection.insert_one(create_default_node(node_id))
