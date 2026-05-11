@@ -149,10 +149,10 @@ def create_default_node(node_id: str):
         "admin_mode": "NORMAL",
         "qr_token": None,
         "checked_in": False,
+        "checkin_time": None,
         "active_session_start": None,
         "last_update": now_ts()
     }
-
 # =====================================================
 # Core Logic
 # =====================================================
@@ -449,6 +449,142 @@ def reserve_space(req: ReservationRequest, credentials: HTTPAuthorizationCredent
 
     return {"status": "ok"}
 
+# =====================================================
+# CHECK IN
+# =====================================================
+class CheckInRequest(BaseModel):
+    node_id: str
+    qr_token: str
+
+@app.post("/api/checkin")
+def check_in(req: CheckInRequest):
+    node = parking_collection.find_one({"node_id": req.node_id})
+
+    if not node:
+        raise HTTPException(404, "Space not found")
+
+    if not node.get("reserved"):
+        raise HTTPException(400, "Space is not reserved")
+
+    if node.get("qr_token") != req.qr_token:
+        raise HTTPException(403, "Invalid QR token")
+
+    if node.get("checked_in"):
+        raise HTTPException(400, "Already checked in")
+
+    checkin_time = now_ts()
+
+    parking_collection.update_one(
+        {"node_id": req.node_id},
+        {"$set": {
+            "checked_in": True,
+            "checkin_time": checkin_time,
+            "active_session_start": checkin_time,
+            "last_update": now_ts()
+        }}
+    )
+
+    return {
+        "status": "ok",
+        "node_id": req.node_id,
+        "checkin_time": checkin_time,
+        "checkin_time_readable": ts_to_readable(checkin_time)
+    }
+
+
+# =====================================================
+# END SESSION
+# =====================================================
+class EndSessionRequest(BaseModel):
+    node_id: str
+
+RATE_PER_HOUR_JMD = 100.0
+
+@app.post("/api/session/end")
+def end_session(req: EndSessionRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    user_id = None
+    if credentials:
+        try:
+            payload = decode_token(credentials.credentials)
+            user_id = payload.get("sub")
+        except:
+            pass
+
+    node = parking_collection.find_one({"node_id": req.node_id})
+
+    if not node:
+        raise HTTPException(404, "Space not found")
+
+    if not node.get("checked_in"):
+        raise HTTPException(400, "No active session for this space")
+
+    # Check sensor — must be FREE to end session
+    if node.get("sensor_status") == "OCCUPIED":
+        raise HTTPException(400, "Vehicle still detected in space. Please drive out before ending your session.")
+
+    end_time    = now_ts()
+    start_time  = node.get("active_session_start") or end_time
+    duration_s  = max(end_time - start_time, 0)
+    duration_hr = duration_s / 3600
+    cost_jmd    = round(duration_hr * RATE_PER_HOUR_JMD, 2)
+
+    # Save completed session
+    sessions_collection.insert_one({
+        "node_id":          req.node_id,
+        "user_id":          user_id,
+        "start_time":       start_time,
+        "end_time":         end_time,
+        "duration_seconds": duration_s,
+        "cost_jmd":         cost_jmd
+    })
+
+    # Clear the space
+    parking_collection.update_one(
+        {"node_id": req.node_id},
+        {"$set": {
+            "reserved":              False,
+            "reservation_start":     None,
+            "reservation_expiry":    None,
+            "reserved_by":           None,
+            "qr_token":              None,
+            "violation":             False,
+            "checked_in":            False,
+            "checkin_time":          None,
+            "active_session_start":  None,
+            "last_update":           now_ts()
+        }}
+    )
+
+    return {
+        "status":           "ok",
+        "node_id":          req.node_id,
+        "start_time":       start_time,
+        "end_time":         end_time,
+        "duration_seconds": duration_s,
+        "cost_jmd":         cost_jmd
+    }
+
+
+# =====================================================
+# USER SESSIONS HISTORY
+# =====================================================
+@app.get("/api/my-sessions")
+def my_sessions(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["sub"]
+
+    out = []
+    for s in (
+        sessions_collection
+        .find({"user_id": user_id}, {"_id": 0})
+        .sort("end_time", -1)
+        .limit(20)
+    ):
+        s["start_time_readable"] = ts_to_readable(s["start_time"])
+        s["end_time_readable"]   = ts_to_readable(s["end_time"])
+        out.append(s)
+
+    return out
+
 
 # =====================================================
 # STATUS
@@ -474,7 +610,8 @@ def get_status():
     "reserved_by": node.get("reserved_by"),
     "server_timestamp": node["last_update"],
     "last_update_readable": ts_to_readable(node["last_update"]),
-    "online": not is_stale
+    "online": not is_stale,
+    "checkin_time": node.get("checkin_time"),
 }
     return out
 
