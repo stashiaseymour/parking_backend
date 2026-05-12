@@ -161,6 +161,8 @@ def compute_final(node):
         return "MAINTENANCE"
     if node["reserved"] and not node["checked_in"] and node["sensor_status"] == "OCCUPIED":
         return "VIOLATION"
+    if node["reserved"] and node["checked_in"]:
+        return node["sensor_status"]  # show actual sensor — OCCUPIED or FREE
     if node["reserved"]:
         return "RESERVED"
     return node["sensor_status"]
@@ -612,6 +614,8 @@ def get_status():
     "last_update_readable": ts_to_readable(node["last_update"]),
     "online": not is_stale,
     "checkin_time": node.get("checkin_time"),
+    "checked_in": node.get("checked_in", False),
+
 }
     return out
 
