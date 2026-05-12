@@ -162,9 +162,9 @@ def compute_final(node):
     if node["reserved"] and not node["checked_in"] and node["sensor_status"] == "OCCUPIED":
         return "VIOLATION"
     if node["reserved"] and node["checked_in"]:
-      if node["sensor_status"] == "OCCUPIED":
-        return "OCCUPIED"
-    return "RESERVED"  # checked in but car not arrived yet — keep as RESERVED
+        if node["sensor_status"] == "OCCUPIED":
+            return "OCCUPIED"
+        return "RESERVED"
     if node["reserved"]:
         return "RESERVED"
     return node["sensor_status"]
@@ -173,20 +173,20 @@ def enforce_expiry(node):
     if node["reserved"] and node["reservation_expiry"]:
         if now_ts() >= node["reservation_expiry"]:
             parking_collection.update_one(
-    {"node_id": req.node_id},
-    {"$set": {
-        "reserved":             False,
-        "reservation_start":    None,
-        "reservation_expiry":   None,
-        "reserved_by":          None,
-        "qr_token":             None,
-        "violation":            False,
-        "checked_in":           False,
-        "checkin_time":         None,
-        "active_session_start": None,
-        "last_update":          now_ts()
-    }}
-)
+                {"node_id": node["node_id"]},
+                {"$set": {
+                    "reserved":             False,
+                    "reservation_start":    None,
+                    "reservation_expiry":   None,
+                    "reserved_by":          None,
+                    "qr_token":             None,
+                    "violation":            False,
+                    "checked_in":           False,
+                    "checkin_time":         None,
+                    "active_session_start": None,
+                    "last_update":          now_ts()
+                }}
+            )
 # =====================================================
 # AUTH ENDPOINTS
 # =====================================================
