@@ -173,19 +173,20 @@ def enforce_expiry(node):
     if node["reserved"] and node["reservation_expiry"]:
         if now_ts() >= node["reservation_expiry"]:
             parking_collection.update_one(
-                {"node_id": node["node_id"]},
-                {"$set": {
-                    "reserved": False,
-                    "reservation_start": None,
-                    "reservation_expiry": None,
-                    "reserved_by": None,
-                    "qr_token": None,
-                    "violation": False,
-                    "checked_in": False,
-                    "last_update": now_ts()
-                }}
-            )
-
+    {"node_id": req.node_id},
+    {"$set": {
+        "reserved":             False,
+        "reservation_start":    None,
+        "reservation_expiry":   None,
+        "reserved_by":          None,
+        "qr_token":             None,
+        "violation":            False,
+        "checked_in":           False,
+        "checkin_time":         None,
+        "active_session_start": None,
+        "last_update":          now_ts()
+    }}
+)
 # =====================================================
 # AUTH ENDPOINTS
 # =====================================================
