@@ -162,7 +162,9 @@ def compute_final(node):
     if node["reserved"] and not node["checked_in"] and node["sensor_status"] == "OCCUPIED":
         return "VIOLATION"
     if node["reserved"] and node["checked_in"]:
-        return node["sensor_status"]  # show actual sensor — OCCUPIED or FREE
+      if node["sensor_status"] == "OCCUPIED":
+        return "OCCUPIED"
+    return "RESERVED"  # checked in but car not arrived yet — keep as RESERVED
     if node["reserved"]:
         return "RESERVED"
     return node["sensor_status"]
