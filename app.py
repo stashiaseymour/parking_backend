@@ -363,6 +363,7 @@ def update_node(data: SensorUpdate):
     session_update = {}
 
     if prev == "FREE" and data.sensor_status == "OCCUPIED":
+      if not node.get("active_session_start"):
         session_update["active_session_start"] = now_ts()
 
     if prev == "OCCUPIED" and data.sensor_status == "FREE":
@@ -528,7 +529,7 @@ def end_session(req: EndSessionRequest, credentials: HTTPAuthorizationCredential
         raise HTTPException(400, "Vehicle still detected in space. Please drive out before ending your session.")
 
     end_time    = now_ts()
-    start_time  = node.get("active_session_start") or end_time
+    start_time = node.get("checkin_time") or node.get("active_session_start") or end_time
     duration_s  = max(end_time - start_time, 0)
     duration_hr = duration_s / 3600
     cost_jmd    = round(duration_hr * RATE_PER_HOUR_JMD, 2)
