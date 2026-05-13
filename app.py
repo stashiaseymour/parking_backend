@@ -103,6 +103,10 @@ def start_of_week():
     d = d - timedelta(days=d.weekday())
     return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
 
+def start_of_month():
+    d = datetime.now(timezone.utc)
+    return int(datetime(d.year, d.month, 1, tzinfo=timezone.utc).timestamp())
+
 # =====================================================
 # JWT Helpers
 # =====================================================
@@ -156,6 +160,7 @@ def create_default_node(node_id: str):
         "active_session_start": None,
         "last_update": now_ts()
     }
+
 # =====================================================
 # Core Logic
 # =====================================================
@@ -190,39 +195,31 @@ def enforce_expiry(node):
                     "last_update":          now_ts()
                 }}
             )
+
 # =====================================================
 # AUTH ENDPOINTS
 # =====================================================
 
 @app.post("/api/auth/register")
 def register(req: RegisterRequest):
-    # Check email already exists
     if users_collection.find_one({"email": req.email.lower().strip()}):
         raise HTTPException(400, "An account with this email already exists")
-
-    # Validate password length
     if len(req.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
-
-    # Hash password
     hashed = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
-
     user_id = str(uuid.uuid4())
     user = {
         "user_id": user_id,
         "name": req.name.strip(),
         "email": req.email.lower().strip(),
         "password_hash": hashed,
-        "role": "user",   # default role
+        "role": "user",
         "created_at": now_ts(),
         "reset_token": None,
         "reset_token_expiry": None
     }
-
     users_collection.insert_one(user)
-
     token = create_token(user_id, user["email"], user["role"])
-
     return {
         "token": token,
         "user": {
@@ -237,15 +234,11 @@ def register(req: RegisterRequest):
 @app.post("/api/auth/login")
 def login(req: LoginRequest):
     user = users_collection.find_one({"email": req.email.lower().strip()})
-
     if not user:
         raise HTTPException(401, "No account found with this email")
-
     if not bcrypt.checkpw(req.password.encode(), user["password_hash"].encode()):
         raise HTTPException(401, "Incorrect password")
-
     token = create_token(user["user_id"], user["email"], user["role"])
-
     return {
         "token": token,
         "user": {
@@ -271,28 +264,18 @@ def get_me(current_user: dict = Depends(get_current_user)):
 @app.post("/api/auth/forgot-password")
 def forgot_password(req: ForgotPasswordRequest):
     user = users_collection.find_one({"email": req.email.lower().strip()})
-
-    # Always return success to prevent email enumeration
     if not user:
         return {"status": "ok", "message": "If that email exists, a reset link has been sent"}
-
     reset_token = secrets.token_urlsafe(32)
-    expiry = now_ts() + 3600  # 1 hour
-
+    expiry = now_ts() + 3600
     users_collection.update_one(
         {"email": req.email.lower().strip()},
-        {"$set": {
-            "reset_token": reset_token,
-            "reset_token_expiry": expiry
-        }}
+        {"$set": {"reset_token": reset_token, "reset_token_expiry": expiry}}
     )
-
-    # In production you would send an email here
-    # For now we return the token directly for testing
     return {
         "status": "ok",
         "message": "Password reset token generated",
-        "reset_token": reset_token  # Remove this in production, send via email instead
+        "reset_token": reset_token
     }
 
 
@@ -302,24 +285,15 @@ def reset_password(req: ResetPasswordRequest):
         "reset_token": req.token,
         "reset_token_expiry": {"$gt": now_ts()}
     })
-
     if not user:
         raise HTTPException(400, "Invalid or expired reset token")
-
     if len(req.new_password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
-
     hashed = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
-
     users_collection.update_one(
         {"reset_token": req.token},
-        {"$set": {
-            "password_hash": hashed,
-            "reset_token": None,
-            "reset_token_expiry": None
-        }}
+        {"$set": {"password_hash": hashed, "reset_token": None, "reset_token_expiry": None}}
     )
-
     return {"status": "ok", "message": "Password reset successfully"}
 
 
@@ -365,14 +339,13 @@ def update_node(data: SensorUpdate):
     prev = node["sensor_status"]
     session_update = {}
 
-prev = node["sensor_status"]
-    session_update = {}
-
     if prev == "FREE" and data.sensor_status == "OCCUPIED":
         if not node.get("active_session_start"):
             session_update["active_session_start"] = now_ts()
 
     if prev == "OCCUPIED" and data.sensor_status == "FREE":
+        # Only auto-save session for walk-in parkers (no reservation)
+        # Reserved sessions are ended explicitly via /api/session/end
         if not node.get("reserved") and node.get("active_session_start"):
             sessions_collection.insert_one({
                 "node_id": data.node_id,
@@ -414,7 +387,6 @@ prev = node["sensor_status"]
 # =====================================================
 @app.post("/api/reserve")
 def reserve_space(req: ReservationRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
-    # Auth optional — works with or without login
     user_id = None
     if credentials:
         try:
@@ -461,6 +433,7 @@ def reserve_space(req: ReservationRequest, credentials: HTTPAuthorizationCredent
 
     return {"status": "ok"}
 
+
 # =====================================================
 # CHECK IN
 # =====================================================
@@ -471,21 +444,16 @@ class CheckInRequest(BaseModel):
 @app.post("/api/checkin")
 def check_in(req: CheckInRequest):
     node = parking_collection.find_one({"node_id": req.node_id})
-
     if not node:
         raise HTTPException(404, "Space not found")
-
     if not node.get("reserved"):
         raise HTTPException(400, "Space is not reserved")
-
     if node.get("qr_token") != req.qr_token:
         raise HTTPException(403, "Invalid QR token")
-
     if node.get("checked_in"):
         raise HTTPException(400, "Already checked in")
 
     checkin_time = now_ts()
-
     parking_collection.update_one(
         {"node_id": req.node_id},
         {"$set": {
@@ -495,7 +463,6 @@ def check_in(req: CheckInRequest):
             "last_update": now_ts()
         }}
     )
-
     return {
         "status": "ok",
         "node_id": req.node_id,
@@ -523,24 +490,18 @@ def end_session(req: EndSessionRequest, credentials: HTTPAuthorizationCredential
             pass
 
     node = parking_collection.find_one({"node_id": req.node_id})
-
     if not node:
         raise HTTPException(404, "Space not found")
-
     if not node.get("checked_in"):
         raise HTTPException(400, "No active session for this space")
-
-    # Check sensor — must be FREE to end session
     if node.get("sensor_status") == "OCCUPIED":
         raise HTTPException(400, "Vehicle still detected in space. Please drive out before ending your session.")
 
-    end_time    = now_ts()
+    end_time   = now_ts()
     start_time = node.get("checkin_time") or node.get("active_session_start") or end_time
-    duration_s  = max(end_time - start_time, 0)
-    duration_hr = duration_s / 3600
-    cost_jmd    = round(duration_hr * RATE_PER_HOUR_JMD, 2)
+    duration_s = max(end_time - start_time, 0)
+    cost_jmd   = round((duration_s / 3600) * RATE_PER_HOUR_JMD, 2)
 
-    # Save completed session
     sessions_collection.insert_one({
         "node_id":          req.node_id,
         "user_id":          user_id,
@@ -550,20 +511,19 @@ def end_session(req: EndSessionRequest, credentials: HTTPAuthorizationCredential
         "cost_jmd":         cost_jmd
     })
 
-    # Clear the space
     parking_collection.update_one(
         {"node_id": req.node_id},
         {"$set": {
-            "reserved":              False,
-            "reservation_start":     None,
-            "reservation_expiry":    None,
-            "reserved_by":           None,
-            "qr_token":              None,
-            "violation":             False,
-            "checked_in":            False,
-            "checkin_time":          None,
-            "active_session_start":  None,
-            "last_update":           now_ts()
+            "reserved":             False,
+            "reservation_start":    None,
+            "reservation_expiry":   None,
+            "reserved_by":          None,
+            "qr_token":             None,
+            "violation":            False,
+            "checked_in":           False,
+            "checkin_time":         None,
+            "active_session_start": None,
+            "last_update":          now_ts()
         }}
     )
 
@@ -583,7 +543,6 @@ def end_session(req: EndSessionRequest, credentials: HTTPAuthorizationCredential
 @app.get("/api/my-sessions")
 def my_sessions(current_user: dict = Depends(get_current_user)):
     user_id = current_user["sub"]
-
     out = []
     for s in (
         sessions_collection
@@ -594,7 +553,6 @@ def my_sessions(current_user: dict = Depends(get_current_user)):
         s["start_time_readable"] = ts_to_readable(s["start_time"])
         s["end_time_readable"]   = ts_to_readable(s["end_time"])
         out.append(s)
-
     return out
 
 
@@ -604,29 +562,27 @@ def my_sessions(current_user: dict = Depends(get_current_user)):
 @app.get("/api/parking/status")
 def get_status():
     out = {}
-    STALE_THRESHOLD = 300  # 5 minutes
+    STALE_THRESHOLD = 300
 
     for node in parking_collection.find():
         enforce_expiry(node)
         is_stale = (now_ts() - node["last_update"]) > STALE_THRESHOLD
-
         out[node["node_id"]] = {
-    "final_status": "OFFLINE" if is_stale else compute_final(node),
-    "sensor_status": node["sensor_status"],
-    "distance_cm": node["distance_cm"],
-    "reserved": node["reserved"],
-    "violation": node["violation"],
-    "admin_mode": node["admin_mode"],
-    "qr_token": node.get("qr_token"),
-    "reservation_expiry": node.get("reservation_expiry"),
-    "reserved_by": node.get("reserved_by"),
-    "server_timestamp": node["last_update"],
-    "last_update_readable": ts_to_readable(node["last_update"]),
-    "online": not is_stale,
-    "checkin_time": node.get("checkin_time"),
-    "checked_in": node.get("checked_in", False),
-
-}
+            "final_status":        "OFFLINE" if is_stale else compute_final(node),
+            "sensor_status":       node["sensor_status"],
+            "distance_cm":         node["distance_cm"],
+            "reserved":            node["reserved"],
+            "violation":           node["violation"],
+            "admin_mode":          node["admin_mode"],
+            "qr_token":            node.get("qr_token"),
+            "reservation_expiry":  node.get("reservation_expiry"),
+            "reserved_by":         node.get("reserved_by"),
+            "server_timestamp":    node["last_update"],
+            "last_update_readable": ts_to_readable(node["last_update"]),
+            "online":              not is_stale,
+            "checkin_time":        node.get("checkin_time"),
+            "checked_in":          node.get("checked_in", False),
+        }
     return out
 
 
@@ -662,9 +618,9 @@ def admin_maintenance(node_id: str):
         {"node_id": node_id},
         {"$set": {
             "admin_mode": "MAINTENANCE",
-            "reserved": False,
-            "qr_token": None,
-            "violation": False,
+            "reserved":   False,
+            "qr_token":   None,
+            "violation":  False,
             "last_update": now_ts()
         }}
     )
@@ -690,26 +646,26 @@ def usage_summary(range: str | None = None):
         match["end_time"] = {"$gte": start_of_today()}
     elif range == "week":
         match["end_time"] = {"$gte": start_of_week()}
+    elif range == "month":
+        match["end_time"] = {"$gte": start_of_month()}
 
     pipeline = []
     if match:
         pipeline.append({"$match": match})
-
     pipeline.append({"$group": {
         "_id": None,
         "total_sessions": {"$sum": 1},
-        "total_time": {"$sum": "$duration_seconds"},
-        "avg_time": {"$avg": "$duration_seconds"}
+        "total_time":     {"$sum": "$duration_seconds"},
+        "avg_time":       {"$avg": "$duration_seconds"}
     }})
 
     r = list(sessions_collection.aggregate(pipeline))
     if not r:
         return {"total_sessions": 0, "total_time_seconds": 0, "average_time_seconds": 0}
-
     r = r[0]
     return {
-        "total_sessions": r["total_sessions"],
-        "total_time_seconds": r["total_time"],
+        "total_sessions":       r["total_sessions"],
+        "total_time_seconds":   r["total_time"],
         "average_time_seconds": round(r["avg_time"], 1)
     }
 
@@ -721,37 +677,39 @@ def usage_by_node(range: str | None = None):
         match["end_time"] = {"$gte": start_of_today()}
     elif range == "week":
         match["end_time"] = {"$gte": start_of_week()}
+    elif range == "month":
+        match["end_time"] = {"$gte": start_of_month()}
 
     pipeline = []
     if match:
         pipeline.append({"$match": match})
-
     pipeline.extend([
         {"$group": {
-            "_id": "$node_id",
+            "_id":            "$node_id",
             "total_sessions": {"$sum": 1},
-            "total_time": {"$sum": "$duration_seconds"},
-            "avg_time": {"$avg": "$duration_seconds"}
+            "total_time":     {"$sum": "$duration_seconds"},
+            "avg_time":       {"$avg": "$duration_seconds"}
         }},
         {"$project": {
-            "_id": 0,
-            "node_id": "$_id",
-            "total_sessions": 1,
-            "total_time_seconds": "$total_time",
-            "average_time_seconds": {"$round": ["$avg_time", 1]}
+            "_id":                    0,
+            "node_id":                "$_id",
+            "total_sessions":         1,
+            "total_time_seconds":     "$total_time",
+            "average_time_seconds":   {"$round": ["$avg_time", 1]}
         }}
     ])
-
     return list(sessions_collection.aggregate(pipeline))
 
 
 @app.get("/api/admin/analytics/recent-sessions")
-def recent_sessions(limit: int = 10, range: str | None = None):
+def recent_sessions(limit: int = 20, range: str | None = None):
     query = {}
     if range == "today":
         query["end_time"] = {"$gte": start_of_today()}
     elif range == "week":
         query["end_time"] = {"$gte": start_of_week()}
+    elif range == "month":
+        query["end_time"] = {"$gte": start_of_month()}
 
     out = []
     for s in (
@@ -763,5 +721,4 @@ def recent_sessions(limit: int = 10, range: str | None = None):
         s["start_time_readable"] = ts_to_readable(s["start_time"])
         s["end_time_readable"]   = ts_to_readable(s["end_time"])
         out.append(s)
-
     return out
