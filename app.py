@@ -365,21 +365,22 @@ def update_node(data: SensorUpdate):
     prev = node["sensor_status"]
     session_update = {}
 
-if prev == "FREE" and data.sensor_status == "OCCUPIED":
-      if not node.get("active_session_start"):
-        session_update["active_session_start"] = now_ts()
+prev = node["sensor_status"]
+    session_update = {}
 
-if prev == "OCCUPIED" and data.sensor_status == "FREE":
-    # Only auto-save session for walk-in parkers (no reservation)
-    # Reserved sessions are ended explicitly via /api/session/end
-    if not node.get("reserved") and node.get("active_session_start"):
-        sessions_collection.insert_one({
-            "node_id": data.node_id,
-            "start_time": node["active_session_start"],
-            "end_time": now_ts(),
-            "duration_seconds": now_ts() - node["active_session_start"]
-        })
-        session_update["active_session_start"] = None
+    if prev == "FREE" and data.sensor_status == "OCCUPIED":
+        if not node.get("active_session_start"):
+            session_update["active_session_start"] = now_ts()
+
+    if prev == "OCCUPIED" and data.sensor_status == "FREE":
+        if not node.get("reserved") and node.get("active_session_start"):
+            sessions_collection.insert_one({
+                "node_id": data.node_id,
+                "start_time": node["active_session_start"],
+                "end_time": now_ts(),
+                "duration_seconds": now_ts() - node["active_session_start"]
+            })
+            session_update["active_session_start"] = None
 
     is_violation = (
         node["admin_mode"] == "NORMAL"
