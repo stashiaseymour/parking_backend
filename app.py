@@ -365,8 +365,8 @@ def update_node(data: SensorUpdate):
     prev = node["sensor_status"]
     session_update = {}
 
-    if prev == "FREE" and data.sensor_status == "OCCUPIED":
-    if not node.get("active_session_start"):
+if prev == "FREE" and data.sensor_status == "OCCUPIED":
+      if not node.get("active_session_start"):
         session_update["active_session_start"] = now_ts()
 
 if prev == "OCCUPIED" and data.sensor_status == "FREE":
